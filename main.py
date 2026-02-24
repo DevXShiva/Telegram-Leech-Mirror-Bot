@@ -13,7 +13,7 @@ web_app = Flask(__name__)
 
 # --- CONFIGURATION ---
 START_IMG = "https://graph.org/file/your-image-url-here.jpg" # Apna Image URL yahan dalein
-LOG_CHANNEL = -100xxxxxxxxx # Apna Log Channel ID yahan dalein
+LOG_CHANNEL = -1002686058050 # Apna Log Channel ID yahan dalein
 
 @web_app.route('/')
 def home(): return "Alive", 200
@@ -178,3 +178,4 @@ async def run():
 
 if __name__ == "__main__":
     asyncio.get_event_loop().run_until_complete(run())
+
