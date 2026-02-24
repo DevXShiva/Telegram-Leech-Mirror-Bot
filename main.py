@@ -11,49 +11,62 @@ from flask import Flask
 app = Client("leech_bot", Config.API_ID, Config.API_HASH, bot_token=Config.BOT_TOKEN)
 web_app = Flask(__name__)
 
+# --- CONFIGURATION ---
+START_IMG = "https://graph.org/file/your-image-url-here.jpg" # Apna Image URL yahan dalein
+LOG_CHANNEL = -100xxxxxxxxx # Apna Log Channel ID yahan dalein
+
 @web_app.route('/')
 def home(): return "Alive", 200
 
-# --- Helper for common limit checks ---
+# --- UI HELPERS ---
+def get_start_buttons():
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("Settings ⚙️", callback_data="settings_menu"),
+            InlineKeyboardButton("Help 🛠️", callback_data="help")
+        ],
+        [InlineKeyboardButton("Toggle Mode: Media/File 📂", callback_data="toggle_mode")]
+    ])
+
+# --- LOG SYSTEM ---
+async def send_log(c, text):
+    if LOG_CHANNEL:
+        try: await c.send_message(LOG_CHANNEL, text)
+        except: pass
+
+# --- LIMIT CHECKS ---
 async def can_start_task(c, m):
     if not await check_fsub(c, m): return False
-    
     if len(ACTIVE_TASKS) >= 5:
-        await m.reply_text("⚠️ **Bot is Overloaded!**\nGlobally 5 tasks are running. Try later.")
+        await m.reply_text("⚠️ **Bot Overloaded!**")
         return False
-        
     u_tasks = [t for t in ACTIVE_TASKS.values() if t['user_id'] == m.from_user.id]
     if len(u_tasks) >= 2: 
-        await m.reply("❌ **Limit Exceeded:** Max 2 tasks per user allowed!")
+        await m.reply("❌ **Limit Exceeded!**")
         return False
     return True
 
-# --- START COMMAND (New UI Style) ---
+# --- START COMMAND ---
 @app.on_message(filters.command("start") & filters.private)
 async def start_msg(c, m):
     if not await check_fsub(c, m): return
     
+    # User Logging
+    if not await db.is_user_exist(m.from_user.id):
+        await db.add_user(m.from_user.id, m.from_user.first_name)
+        await send_log(c, f"🆕 **New User Started Bot**\n👤 {m.from_user.mention}\n🆔 `{m.from_user.id}`")
+
     welcome_text = (
         f"<b>👋 Hi {m.from_user.mention}!</b>\n\n"
         "I am a powerful **Pro Leech Bot**.\n\n"
         "🚀 **Commands:**\n"
         "• `/yt URL -n Name` : Social Media Leech\n"
         "• `/l URL -n Name` : Direct Link Leech\n"
-        "• `/status` : Check Tasks\n\n"
-        "<b>All files are sent to your PM!</b>"
+        "• `/status` : Check Tasks"
     )
+    await m.reply_photo(photo=START_IMG, caption=welcome_text, reply_markup=get_start_buttons())
 
-    buttons = [
-        [
-            InlineKeyboardButton("Settings ⚙️", callback_data="settings_menu"),
-            InlineKeyboardButton("Help 🛠️", callback_data="help")
-        ],
-        [InlineKeyboardButton("Toggle Mode: Media/File 📂", callback_data="toggle_mode")]
-    ]
-    
-    await m.reply_text(text=welcome_text, reply_markup=InlineKeyboardMarkup(buttons))
-
-# --- SETTINGS & CALLBACK HANDLER ---
+# --- CALLBACK HANDLER (Edit Only Logic) ---
 @app.on_callback_query()
 async def cb_handler(c, query):
     user_id = query.from_user.id
@@ -61,16 +74,16 @@ async def cb_handler(c, query):
     if query.data == "settings_menu":
         mode = await db.get_upload_mode(user_id) or "Media"
         thumb = await db.get_thumb(user_id)
-        thumb_status = "✅ Set" if thumb else "❌ Not Set (Auto-Gen)"
+        thumb_status = "✅ Set" if thumb else "❌ Not Set"
         
         settings_text = (
             f"<b>⚙️ Bot Configuration</b>\n\n"
             f"<b>Upload Mode:</b> <code>{mode}</code>\n"
             f"<b>Custom Thumb:</b> <code>{thumb_status}</code>\n\n"
             "• /set_thumb : Reply to photo\n"
-            "• /set_caption : Set custom caption"
+            "• /del_thumb : Clear thumb"
         )
-        await query.message.edit_text(settings_text, reply_markup=InlineKeyboardMarkup([
+        await query.message.edit_caption(caption=settings_text, reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("Back 🔙", callback_data="back_start")]
         ]))
 
@@ -78,93 +91,89 @@ async def cb_handler(c, query):
         curr = await db.get_upload_mode(user_id) or "Media"
         new = "Document" if curr == "Media" else "Media"
         await db.set_upload_mode(user_id, new)
-        await query.answer(f"✅ Upload Mode: {new}", show_alert=True)
+        await query.answer(f"✅ Mode: {new}", show_alert=True)
+        # Re-trigger settings menu to show updated mode
+        query.data = "settings_menu"
+        await cb_handler(c, query)
 
     elif query.data == "back_start":
-        await start_msg(c, query.message)
+        welcome_text = (
+            f"<b>👋 Hi {query.from_user.mention}!</b>\n\n"
+            "I am a powerful **Pro Leech Bot**.\n\n"
+            "🚀 **Commands:**\n"
+            "• `/yt URL -n Name` : Social Media Leech\n"
+            "• `/l URL -n Name` : Direct Link Leech\n"
+        )
+        await query.message.edit_caption(caption=welcome_text, reply_markup=get_start_buttons())
 
     elif query.data == "help":
-        help_txt = "Send link with `/yt` or `/l` command. Use `-n` for custom name.\nExample: `/yt URL -n MyVideo`"
-        await query.message.edit_text(help_txt, reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("Back 🔙", callback_data="back_start")]
-        ]))
+        await query.message.edit_caption(
+            caption="<b>🛠 Help Menu</b>\n\nUse `/yt` or `/l` with `-n` for custom name.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back 🔙", callback_data="back_start")]])
+        )
 
-# --- ENGINE 1: yt-dlp Command ---
+# --- ADMIN COMMANDS ---
+@app.on_message(filters.command("stats") & filters.user(Config.ADMINS))
+async def stats_cmd(c, m):
+    total = await db.total_users_count()
+    await m.reply_text(f"📊 **Total Users:** `{total}`")
+
+@app.on_message(filters.command("broadcast") & filters.user(Config.ADMINS))
+async def broadcast_handler(c, m):
+    if not m.reply_to_message: return await m.reply("Reply to a message.")
+    users = await db.get_all_users()
+    count = 0
+    async for user in users:
+        try:
+            await m.reply_to_message.copy(user['id'])
+            count += 1
+        except: pass
+    await m.reply(f"✅ Broadcast Done! Sent to `{count}` users.")
+
+# --- LEECH COMMANDS ---
 @app.on_message(filters.command("yt"))
 async def yt_cmd(c, m):
     if not await can_start_task(c, m): return
-    
     parts = m.text.split(None, 1)
-    if len(parts) < 2: 
-        return await m.reply("❌ Usage: `/yt URL -n Name`")
+    if len(parts) < 2: return await m.reply("❌ Provide URL")
     
-    raw_data = parts[1]
-    name = "default"
-    if "-n " in raw_data:
-        url = raw_data.split("-n ")[0].strip()
-        name = raw_data.split("-n ")[1].strip()
-    else:
-        url = raw_data.strip()
-
+    raw = parts[1]
+    name, url = ("default", raw.split("-n ")[0].strip()) if "-n " not in raw else (raw.split("-n ")[1].strip(), raw.split("-n ")[0].strip())
+    
     tid = str(int(time.time()))
+    await send_log(c, f"🎬 **YT Leech Started**\n👤 {m.from_user.first_name}\n🔗 {url}")
     asyncio.create_task(leech_logic(c, m, tid, url, name))
 
-# --- ENGINE 2: Direct Leech Command ---
 @app.on_message(filters.command("l"))
 async def direct_cmd(c, m):
     if not await can_start_task(c, m): return
-    
     parts = m.text.split(None, 1)
-    if len(parts) < 2: 
-        return await m.reply("❌ Usage: `/l URL -n Name`")
+    if len(parts) < 2: return await m.reply("❌ Provide URL")
     
-    raw_data = parts[1]
-    name = "default"
-    if "-n " in raw_data:
-        url = raw_data.split("-n ")[0].strip()
-        name = raw_data.split("-n ")[1].strip()
-    else:
-        url = raw_data.strip()
-
+    raw = parts[1]
+    name, url = ("default", raw.split("-n ")[0].strip()) if "-n " not in raw else (raw.split("-n ")[1].strip(), raw.split("-n ")[0].strip())
+    
     tid = str(int(time.time()))
+    await send_log(c, f"🚀 **Direct Leech Started**\n👤 {m.from_user.first_name}\n🔗 {url}")
     asyncio.create_task(direct_download_logic(c, m, tid, url, name))
 
-# --- OTHER COMMANDS ---
-@app.on_message(filters.command("status"))
-async def status_cmd(c, m):
-    if not ACTIVE_TASKS:
-        return await m.reply_text("❌ No active tasks!")
-    status_text = await get_status_msg(ACTIVE_TASKS)
-    await m.reply_text(status_text)
-
+# --- THUMBNAIL ---
 @app.on_message(filters.command("set_thumb") & filters.private)
 async def set_thumb_cmd(c, m):
-    reply = m.reply_to_message
-    if not reply or not reply.photo:
-        return await m.reply("❌ Reply to a <b>Photo</b> to set thumb.")
-    await db.set_thumb(m.from_user.id, reply.photo.file_id)
-    await m.reply("✅ **Thumbnail Saved!**")
+    if m.reply_to_message and m.reply_to_message.photo:
+        await db.set_thumb(m.from_user.id, m.reply_to_message.photo.file_id)
+        await m.reply("✅ Thumb Saved!")
+    else: await m.reply("Reply to a photo.")
 
-@app.on_message(filters.regex(r"^/cancel_"))
-async def cancel_handler(c, m):
-    tid = m.text.split("_")[1]
-    if tid in ACTIVE_TASKS:
-        if ACTIVE_TASKS[tid]['user_id'] == m.from_user.id or m.from_user.id in Config.ADMINS:
-            if tid not in STOP_TASKS:
-                STOP_TASKS.append(tid)
-                await m.reply("🛑 **Cancellation request received.**")
-            else:
-                await m.reply("Already cancelling...")
-        else:
-            await m.reply("⚠️ Not your task!")
-    else:
-        await m.reply("❌ Task not found.")
+@app.on_message(filters.command("del_thumb") & filters.private)
+async def del_thumb_cmd(c, m):
+    await db.set_thumb(m.from_user.id, None)
+    await m.reply("🗑️ Thumb Deleted!")
 
-# --- Bot Runner ---
+# --- Runner ---
 async def run():
     threading.Thread(target=lambda: web_app.run(host="0.0.0.0", port=10000), daemon=True).start()
     await app.start()
-    print("🚀 Bot Started with UI and Dual Engine!")
     await idle()
 
 if __name__ == "__main__":
