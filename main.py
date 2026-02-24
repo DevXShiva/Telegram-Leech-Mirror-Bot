@@ -12,8 +12,8 @@ app = Client("leech_bot", Config.API_ID, Config.API_HASH, bot_token=Config.BOT_T
 web_app = Flask(__name__)
 
 # --- CONFIGURATION ---
-START_IMG = "LOGO.png" # Apna Image URL yahan dalein
-LOG_CHANNEL = -1002686058050 # Apna Log Channel ID yahan dalein
+START_IMG = "LOGO.png" 
+LOG_CHANNEL = Config.LOG_CHANNEL # Config se connect kiya
 
 @web_app.route('/')
 def home(): return "Alive", 200
@@ -34,27 +34,49 @@ async def send_log(c, text):
         try: await c.send_message(LOG_CHANNEL, text)
         except: pass
 
-# --- LIMIT CHECKS ---
+# --- LIMIT & PM CHECKS ---
 async def can_start_task(c, m):
+    user_id = m.from_user.id
+    
+    # 1. Force Subscribe Check
     if not await check_fsub(c, m): return False
+    
+    # 2. Private Message (PM) Check for Group Commands
+    if m.chat.type != enums.ChatType.PRIVATE:
+        try:
+            await c.send_chat_action(user_id, enums.ChatAction.TYPING)
+        except:
+            # Agar bot user ko message nahi bhej sakta (PM not started)
+            await m.reply_text(
+                f"❌ {m.from_user.mention}, please start me in Private first to receive files!",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("Start Bot in PM 🤖", url=f"https://t.me/{(await c.get_me()).username}?start=help")
+                ]])
+            )
+            return False
+
+    # 3. Global Task Limit
     if len(ACTIVE_TASKS) >= 5:
-        await m.reply_text("⚠️ **Bot Overloaded!**")
+        await m.reply_text("⚠️ **Bot Overloaded! Max 5 global tasks.**")
         return False
-    u_tasks = [t for t in ACTIVE_TASKS.values() if t['user_id'] == m.from_user.id]
+        
+    # 4. User Task Limit
+    u_tasks = [t for t in ACTIVE_TASKS.values() if t.get('user_id') == user_id]
     if len(u_tasks) >= 2: 
-        await m.reply("❌ **Limit Exceeded!**")
+        await m.reply("❌ **Limit Exceeded! You can run only 2 tasks at a time.**")
         return False
+        
     return True
 
 # --- START COMMAND ---
-@app.on_message(filters.command("start") & filters.private)
+@app.on_message(filters.command("start"))
 async def start_msg(c, m):
-    if not await check_fsub(c, m): return
-    
     # User Logging
     if not await db.is_user_exist(m.from_user.id):
         await db.add_user(m.from_user.id, m.from_user.first_name)
         await send_log(c, f"🆕 **New User Started Bot**\n👤 {m.from_user.mention}\n🆔 `{m.from_user.id}`")
+
+    if not await check_fsub(c, m): return
 
     welcome_text = (
         f"<b>👋 Hi {m.from_user.mention}!</b>\n\n"
@@ -64,9 +86,13 @@ async def start_msg(c, m):
         "• `/l URL -n Name` : Direct Link Leech\n"
         "• `/status` : Check Tasks"
     )
-    await m.reply_photo(photo=START_IMG, caption=welcome_text, reply_markup=get_start_buttons())
+    
+    if m.chat.type == enums.ChatType.PRIVATE:
+        await m.reply_photo(photo=START_IMG, caption=welcome_text, reply_markup=get_start_buttons())
+    else:
+        await m.reply_text("Bot is alive! Send commands or use me in Private.")
 
-# --- CALLBACK HANDLER (Edit Only Logic) ---
+# --- CALLBACK HANDLER ---
 @app.on_callback_query()
 async def cb_handler(c, query):
     user_id = query.from_user.id
@@ -92,7 +118,6 @@ async def cb_handler(c, query):
         new = "Document" if curr == "Media" else "Media"
         await db.set_upload_mode(user_id, new)
         await query.answer(f"✅ Mode: {new}", show_alert=True)
-        # Re-trigger settings menu to show updated mode
         query.data = "settings_menu"
         await cb_handler(c, query)
 
@@ -174,9 +199,8 @@ async def del_thumb_cmd(c, m):
 async def run():
     threading.Thread(target=lambda: web_app.run(host="0.0.0.0", port=10000), daemon=True).start()
     await app.start()
+    print("Bot Started!")
     await idle()
 
 if __name__ == "__main__":
     asyncio.get_event_loop().run_until_complete(run())
-
-
