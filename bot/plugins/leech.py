@@ -3,7 +3,7 @@ from pyrogram import Client, filters
 from bot.config import Config
 from bot.helpers.ffmpeg import generate_thumbnail
 from bot.helpers.database import db
-from bot.helpers.progress import get_status_msg # Progress dashboard helper
+from bot.helpers.progress import get_status_msg 
 
 # Global Tasks Tracking
 ACTIVE_TASKS = {}
@@ -14,11 +14,9 @@ async def status_updater(msg, tid):
     """Background task jo message ko har 4-5 second mein edit karega."""
     while tid in ACTIVE_TASKS:
         try:
-            # Sirf current task ka status fetch karna
             status_text = await get_status_msg({tid: ACTIVE_TASKS[tid]})
-            # Edit tabhi karein jab text change ho (FloodWait se bachne ke liye)
             await msg.edit_text(status_text)
-            await asyncio.sleep(4) # Telegram ki limit ke hisab se 4s safe hai
+            await asyncio.sleep(4) 
         except Exception:
             await asyncio.sleep(4)
             continue
@@ -28,6 +26,7 @@ async def leech_logic(client, message, tid, url, name):
         d_path = f"downloads/{tid}/"
         os.makedirs(d_path, exist_ok=True)
         user_id = message.from_user.id
+        group_id = message.chat.id # Jahan se command aayi hai
         
         # 1. Task Initialization
         ACTIVE_TASKS[tid] = {
@@ -38,10 +37,9 @@ async def leech_logic(client, message, tid, url, name):
         
         await db.add_task(tid, user_id, name)
 
-        # Pehla Status Message bhejna (Added to Queue ki jagah)
-        from bot.helpers.progress import get_status_msg
+        # Status Message Group mein bhejna
         initial_status = await get_status_msg({tid: ACTIVE_TASKS[tid]})
-        status_msg = await message.reply_text(initial_status)
+        status_msg = await client.send_message(group_id, initial_status)
 
         # Background updater shuru karna
         updater_task = asyncio.create_task(status_updater(status_msg, tid))
@@ -79,8 +77,8 @@ async def leech_logic(client, message, tid, url, name):
                     os.rename(file_path, new_path)
                     file_path = new_path
 
-            # 3. Uploading Phase
-            ACTIVE_TASKS[tid]['status'] = "Uploading"
+            # 3. Uploading Phase (Update Status for UI)
+            ACTIVE_TASKS[tid]['status'] = "Uploading to PM"
             thumb = generate_thumbnail(file_path, f"{d_path}thumb.jpg")
             
             async def upload_progress(current, total):
@@ -88,28 +86,43 @@ async def leech_logic(client, message, tid, url, name):
                     client.stop_transmission()
                 ACTIVE_TASKS[tid]['curr'], ACTIVE_TASKS[tid]['total'] = current, total
 
+            # FILE SEND TO USER PM
             sent = await client.send_video(
-                chat_id=message.chat.id, 
+                chat_id=user_id, # Private Message
                 video=file_path, 
                 thumb=thumb,
                 caption=f"✅ **Leeched:** `{os.path.basename(file_path)}`",
                 progress=upload_progress
             )
             
-            await sent.copy(Config.DUMP_CHAT_ID, caption=f"👤 {message.from_user.mention}\n🔗 {url}")
+            # COPY TO DUMP CHANNEL
+            try:
+                await sent.copy(Config.DUMP_CHAT_ID, caption=f"👤 {message.from_user.mention}\n🔗 {url}")
+            except: pass
+
             await db.increment_task_stat(user_id)
             
-            # Success par status message delete kar sakte hain ya "Completed" likh sakte hain
-            await status_msg.edit_text(f"✅ **Leech Completed:** `{name}`")
+            # 4. Group notification with Tag
+            await status_msg.edit_text(
+                f"✅ {message.from_user.mention}, **Task Completed!**\n\n"
+                f"📂 **File:** `{os.path.basename(file_path)}`\n"
+                f"📥 **Status:** File has been sent to your PM."
+            )
 
         except Exception as e:
-            await status_msg.edit_text(f"❌ **Task Error/Stopped:** `{str(e)}`")
+            await status_msg.edit_text(f"❌ **Task Error:** `{str(e)}` \n(Make sure you started the bot in PM)")
             
         finally:
-            # Background updater band karna
+            # Loop stop karein
             updater_task.cancel()
             
-            # --- AUTO-CLEANUP LAYER ---
+            # 10 Seconds wait karein phir group msg delete karein
+            await asyncio.sleep(10)
+            try:
+                await status_msg.delete()
+            except: pass
+            
+            # --- AUTO-CLEANUP ---
             ACTIVE_TASKS.pop(tid, None)
             if tid in STOP_TASKS: 
                 STOP_TASKS.remove(tid)
