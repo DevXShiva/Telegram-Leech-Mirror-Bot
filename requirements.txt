@@ -4,5 +4,6 @@ yt-dlp
 motor
 dnspython
 aiohttp
+psutil
 flask
 python-dotenv
