@@ -21,3 +21,4 @@ class Config:
     # Log channel ID dalo (-100 se shuru honi chahiye)
     LOG_CHANNEL = int(os.environ.get("LOG_CHANNEL", -1002686058050))
     DUMP_CHAT_ID = int(os.environ.get("DUMP_CHAT_ID", LOG_CHANNEL))
+    FSUB_CHANNEL = "-1003627956964"
