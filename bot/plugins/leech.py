@@ -1,5 +1,5 @@
 import os, asyncio, yt_dlp, time, shutil, aiohttp, subprocess
-from pyrogram import Client, filters
+from pyrogram import Client, filters, enums
 from bot.config import Config
 from bot.helpers.ffmpeg import generate_thumbnail
 from bot.helpers.database import db
@@ -33,7 +33,6 @@ async def split_file(file_path, tid):
     base_name = os.path.basename(file_path)
     dir_name = os.path.dirname(file_path)
     
-    # Linux Command: a (Add/Archive), -v (Volume Size), -mx0 (No Compression - Super Fast)
     split_size = f"{int(MAX_SIZE)}b"
     output_7z = f"{file_path}.7z"
     cmd = ["7z", "a", f"-v{split_size}", "-mx0", output_7z, file_path]
@@ -41,18 +40,11 @@ async def split_file(file_path, tid):
     process = await asyncio.create_subprocess_exec(
         *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
     )
-    stdout, stderr = await process.communicate()
+    await process.communicate()
     
-    if process.returncode != 0:
-        err = stderr.decode()
-        print(f"Split Error: {err}")
-        raise Exception(f"Split Error: {err}")
-    
-    # Original badi file delete karein
     if os.path.exists(file_path):
         os.remove(file_path)
     
-    # Parts ki list scan karein (.001, .002 formats)
     parts = sorted([
         os.path.join(dir_name, f) 
         for f in os.listdir(dir_name) 
@@ -61,6 +53,7 @@ async def split_file(file_path, tid):
     return parts
 
 async def common_upload_logic(client, user_id, tid, file_path, name, url, is_video):
+    """Media/File toggle, Auto-Thumb aur No 7z extension ke sath upload logic."""
     d_path = os.path.dirname(file_path)
     
     # 2GB Check
@@ -71,7 +64,15 @@ async def common_upload_logic(client, user_id, tid, file_path, name, url, is_vid
 
     total_parts = len(files_to_upload)
     
+    # Fetch User Settings (Default to 'Media' if not set)
+    upload_mode = await db.get_upload_mode(user_id) or "Media"
+    custom_thumb = await db.get_thumb(user_id)
+
     for i, path in enumerate(files_to_upload):
+        # 1. Filename fix: .7z extension hide karna
+        original_name = os.path.basename(path)
+        clean_name = original_name.replace(".7z", "")
+        
         part_info = f" (Part {i+1}/{total_parts})" if total_parts > 1 else ""
         ACTIVE_TASKS[tid]['status'] = f"Uploading{part_info}"
         
@@ -79,33 +80,64 @@ async def common_upload_logic(client, user_id, tid, file_path, name, url, is_vid
             if tid in STOP_TASKS: client.stop_transmission()
             ACTIVE_TASKS[tid].update({'curr': c, 'total': t})
 
-        # Thumbnail only for full video, not for split parts (to avoid errors)
-        thumb = None
-        if is_video and total_parts == 1:
-            thumb = generate_thumbnail(path, f"{d_path}/thumb.jpg")
-            sent = await client.send_video(chat_id=user_id, video=path, thumb=thumb,
-                                          caption=f"✅ **Leeched:** `{os.path.basename(path)}`", progress=up_prog)
-        else:
-            # Split parts as Documents for safety
-            sent = await client.send_document(chat_id=user_id, document=path, 
-                                             caption=f"✅ **Leeched:** `{os.path.basename(path)}` {part_info}", progress=up_prog)
+        # 2. Thumbnail Logic: Custom -> Auto -> None
+        ph_path = None
+        if custom_thumb:
+            try: ph_path = await client.download_media(custom_thumb)
+            except: ph_path = None
         
-        try: await sent.copy(Config.DUMP_CHAT_ID)
-        except: pass
+        if not ph_path and is_video:
+            # Auto-generate thumbnail if no custom thumb
+            ph_path = generate_thumbnail(path, f"{d_path}/thumb_{i}.jpg")
+
+        caption = f"✅ **Leeched:** `{clean_name}`{part_info}"
+        
+        # 3. Upload Mode Logic: Media vs Document
+        try:
+            if upload_mode == "Media" and is_video:
+                sent = await client.send_video(
+                    chat_id=user_id, video=path, thumb=ph_path, 
+                    caption=caption, file_name=clean_name, progress=up_prog
+                )
+            else:
+                sent = await client.send_document(
+                    chat_id=user_id, document=path, thumb=ph_path, 
+                    caption=caption, file_name=clean_name, progress=up_prog
+                )
+            
+            try: await sent.copy(Config.DUMP_CHAT_ID)
+            except: pass
+        except Exception as e:
+            print(f"Upload Error: {e}")
+        finally:
+            if ph_path and os.path.exists(ph_path):
+                os.remove(ph_path)
 
 # --- ENGINE 1: yt-dlp ---
-async def leech_logic(client, message, tid, url, name):
+@Client.on_message(filters.command("yt") & filters.private)
+async def leech_logic(client, message):
+    text = message.text.split(None, 1)
+    if len(text) < 2: return await message.reply("❌ Usage: `/yt URL -n Name`")
+    
+    raw_data = text[1]
+    name = "default"
+    if "-n " in raw_data:
+        url = raw_data.split("-n ")[0].strip()
+        name = raw_data.split("-n ")[1].strip()
+    else: url = raw_data.strip()
+
+    tid = str(int(time.time()))
     async with semaphore:
         d_path = f"downloads/{tid}/"
         os.makedirs(d_path, exist_ok=True)
-        user_id, group_id = message.from_user.id, message.chat.id
+        user_id = message.from_user.id
         
         ACTIVE_TASKS[tid] = {'name': name, 'curr': 0, 'total': 1, 'status': 'Downloading', 
                             'speed': '0B/s', 'eta': 'N/A', 'start_time': time.time(),
                             'user_name': message.from_user.first_name, 'user_id': user_id}
         
         await db.add_task(tid, user_id, name)
-        status_msg = await client.send_message(group_id, "⏳ Initializing yt-dlp...")
+        status_msg = await client.send_message(message.chat.id, "⏳ Initializing yt-dlp...")
         updater_task = asyncio.create_task(status_updater(status_msg, tid))
 
         try:
@@ -132,16 +164,28 @@ async def leech_logic(client, message, tid, url, name):
             await status_msg.edit_text(f"❌ **Error:** `{str(e)}`")
         finally:
             updater_task.cancel()
-            await asyncio.sleep(10); await status_msg.delete()
+            await asyncio.sleep(5); await status_msg.delete()
             ACTIVE_TASKS.pop(tid, None)
             shutil.rmtree(d_path, ignore_errors=True); await db.rm_task(tid)
 
 # --- ENGINE 2: Direct Leech ---
-async def direct_download_logic(client, message, tid, url, name):
+@Client.on_message(filters.command("l") & filters.private)
+async def direct_download_logic(client, message):
+    text = message.text.split(None, 1)
+    if len(text) < 2: return await message.reply("❌ Usage: `/l URL -n Name`")
+    
+    raw_data = text[1]
+    name = "default"
+    if "-n " in raw_data:
+        url = raw_data.split("-n ")[0].strip()
+        name = raw_data.split("-n ")[1].strip()
+    else: url = raw_data.strip()
+
+    tid = str(int(time.time()))
     async with semaphore:
         d_path = f"downloads/{tid}/"
         os.makedirs(d_path, exist_ok=True)
-        user_id, group_id = message.from_user.id, message.chat.id
+        user_id = message.from_user.id
 
         ACTIVE_TASKS[tid] = {'name': name if name != "default" else "Direct File",
                             'curr': 0, 'total': 1, 'status': 'Downloading (Direct)',
@@ -149,7 +193,7 @@ async def direct_download_logic(client, message, tid, url, name):
                             'user_name': message.from_user.first_name, 'user_id': user_id}
         
         await db.add_task(tid, user_id, name)
-        status_msg = await client.send_message(group_id, "⏳ Initializing Direct Download...")
+        status_msg = await client.send_message(message.chat.id, "⏳ Initializing Direct Download...")
         updater_task = asyncio.create_task(status_updater(status_msg, tid))
 
         try:
@@ -183,6 +227,14 @@ async def direct_download_logic(client, message, tid, url, name):
             await status_msg.edit_text(f"❌ **Error:** `{str(e)}`")
         finally:
             updater_task.cancel()
-            await asyncio.sleep(10); await status_msg.delete()
+            await asyncio.sleep(5); await status_msg.delete()
             ACTIVE_TASKS.pop(tid, None)
             shutil.rmtree(d_path, ignore_errors=True); await db.rm_task(tid)
+
+# --- STATUS COMMAND ---
+@Client.on_message(filters.command("status") & filters.private)
+async def status_cmd(client, message):
+    if not ACTIVE_TASKS:
+        return await message.reply_text("❌ No active tasks!")
+    status_text = await get_status_msg(ACTIVE_TASKS)
+    await message.reply_text(status_text)
