@@ -1,6 +1,8 @@
 pyrogram
 tgcrypto
 yt-dlp
+motor
+dnspython
 psutil
 flask
 python-dotenv
