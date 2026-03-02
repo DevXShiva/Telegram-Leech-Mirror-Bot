@@ -4,7 +4,7 @@ from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from bot.config import Config
 from bot.helpers.fsub import check_fsub
 from bot.helpers.database import db
-from bot.plugins.leech import leech_logic, direct_download_logic, ACTIVE_TASKS, STOP_TASKS
+from bot.plugins.leech import leech_logic, direct_download_logic, ACTIVE_TASKS, STOP_TASKS, process_leech_download
 from bot.helpers.progress import get_status_msg
 from flask import Flask
 
@@ -83,7 +83,10 @@ async def start_msg(c, m):
     )
     
     if m.chat.type == enums.ChatType.PRIVATE:
-        await m.reply_photo(photo=START_IMG, caption=welcome_text, reply_markup=get_start_buttons())
+        try:
+            await m.reply_photo(photo=START_IMG, caption=welcome_text, reply_markup=get_start_buttons())
+        except:
+            await m.reply_text(welcome_text, reply_markup=get_start_buttons())
     else:
         await m.reply_text("Bot is alive! Send commands or use me in Private.")
 
@@ -116,6 +119,18 @@ async def user_dashboard(c, m):
 @app.on_callback_query()
 async def cb_handler(c, query):
     user_id = query.from_user.id
+    
+    # --- NEW: Handle Quality Selection ---
+    if query.data.startswith("dl_"):
+        _, tid, f_id = query.data.split("_", 2)
+        if tid not in ACTIVE_TASKS:
+            return await query.answer("❌ Task Expired! Send link again.", show_alert=True)
+        
+        await query.message.edit_text(f"🚀 **Starting Download... Quality ID:** `{f_id}`")
+        # Start the actual download process from leech.py
+        asyncio.create_task(process_leech_download(c, query.message, tid, f_id))
+        return
+
     if query.data == "settings_menu":
         mode = await db.get_upload_mode(user_id) or "Media"
         thumb = await db.get_thumb(user_id)
@@ -131,18 +146,24 @@ async def cb_handler(c, query):
             "• /set_thumb : Reply to photo\n"
             "• Send .txt file for cookies"
         )
-        await query.message.edit_caption(caption=settings_text, reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("Toggle Mode 📂", callback_data="toggle_mode")],
-            [InlineKeyboardButton("Upload Cookies 🍪", callback_data="ask_cookies")],
-            [InlineKeyboardButton("Back 🔙", callback_data="back_start")]
-        ]))
+        try:
+            await query.message.edit_caption(caption=settings_text, reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("Toggle Mode 📂", callback_data="toggle_mode")],
+                [InlineKeyboardButton("Upload Cookies 🍪", callback_data="ask_cookies")],
+                [InlineKeyboardButton("Back 🔙", callback_data="back_start")]
+            ]))
+        except:
+             await query.message.edit_text(text=settings_text, reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("Toggle Mode 📂", callback_data="toggle_mode")],
+                [InlineKeyboardButton("Upload Cookies 🍪", callback_data="ask_cookies")],
+                [InlineKeyboardButton("Back 🔙", callback_data="back_start")]
+            ]))
 
     elif query.data == "toggle_mode":
         curr = await db.get_upload_mode(user_id) or "Media"
         new = "Document" if curr == "Media" else "Media"
         await db.set_upload_mode(user_id, new)
         await query.answer(f"✅ Mode: {new}", show_alert=True)
-        # Refresh current menu
         query.data = "settings_menu"
         await cb_handler(c, query)
 
@@ -164,13 +185,17 @@ async def cb_handler(c, query):
             "• `/yt URL -n Name` : Social Media\n"
             "• `/l URL -n Name` : Direct Link"
         )
-        await query.message.edit_caption(caption=welcome_text, reply_markup=get_start_buttons())
+        try:
+            await query.message.edit_caption(caption=welcome_text, reply_markup=get_start_buttons())
+        except:
+            await query.message.edit_text(text=welcome_text, reply_markup=get_start_buttons())
 
     elif query.data == "help":
-        await query.message.edit_caption(
-            caption="<b>🛠 Help Menu</b>\n\nUse `/yt` or `/l` with `-n` for custom name.\nUse `-e` with `/l` or `/yt` to skip merging (Episode-wise).\n\nSend `cookies.txt` file to use premium accounts.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back 🔙", callback_data="back_start")]])
-        )
+        help_text = "<b>🛠 Help Menu</b>\n\nUse `/yt` or `/l` with `-n` for custom name.\nUse `-e` with `/l` or `/yt` to skip merging (Episode-wise).\n\nSend `cookies.txt` file to use premium accounts."
+        try:
+            await query.message.edit_caption(caption=help_text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back 🔙", callback_data="back_start")]]))
+        except:
+            await query.message.edit_text(text=help_text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back 🔙", callback_data="back_start")]]))
 
 # --- COOKIE FILE HANDLER ---
 @app.on_message(filters.document & filters.private)
@@ -233,7 +258,8 @@ async def yt_cmd(c, m):
     url, name, is_extract = parse_args(m.text.split(None, 1)[1])
     tid = str(int(time.time()))
     
-    await send_log(c, f"🎬 **YT Leech Started**\n👤 {m.from_user.first_name}\n🔗 {url}\nExtract: {is_extract}")
+    await send_log(c, f"🎬 **YT Format Request**\n👤 {m.from_user.first_name}\n🔗 {url}")
+    # This now shows buttons instead of starting download
     asyncio.create_task(leech_logic(c, m, tid, url, name, is_extract))
 
 @app.on_message(filters.command("l"))
@@ -247,6 +273,7 @@ async def direct_cmd(c, m):
     log_msg = f"🚀 **Direct/GDrive Started**\n👤 {m.from_user.first_name}\n🔗 {url}\nMode: {'Extract (-e)' if is_extract else 'Default (Merge)'}"
     await send_log(c, log_msg)
     
+    # Direct links typically don't have multiple quality options like YT, so we start directly
     asyncio.create_task(direct_download_logic(c, m, tid, url, name, is_extract))
 
 # --- THUMBNAIL ---
