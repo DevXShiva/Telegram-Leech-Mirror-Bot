@@ -55,7 +55,7 @@ async def split_file(file_path, tid):
     return sorted([os.path.join(dir_name, f) for f in os.listdir(dir_name) if f.startswith(base_name + ".7z")])
 
 async def extract_zip_only(d_path, tid):
-    """Naya logic: Sirf unzip karne ke liye jab user -e use kare."""
+    """Episode-wise Extraction: Jab user -e use kare."""
     ACTIVE_TASKS[tid]['status'] = "Unzipping Episodes..."
     zip_extensions = ('.zip', '.7z', '.rar', '.001')
     zip_files = [f for f in os.listdir(d_path) if f.lower().endswith(zip_extensions)]
@@ -64,30 +64,34 @@ async def extract_zip_only(d_path, tid):
 
     for f in zip_files:
         file_path = os.path.join(d_path, f)
+        # x command extracts with full paths
         cmd = ["7z", "x", file_path, f"-o{d_path}", "-y"]
         process = await asyncio.create_subprocess_exec(*cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         await process.communicate()
         if os.path.exists(file_path): os.remove(file_path)
-    
-    # Cleaning up empty folders if any created during extraction
     return True
 
 async def extract_and_merge(d_path, tid):
-    ACTIVE_TASKS[tid]['status'] = "Merging/Extracting..."
-    zip_files = sorted([f for f in os.listdir(d_path) if f.endswith(('.zip', '.7z', '.001', '.rar'))])
-    if not zip_files: return False
-    first_part = os.path.join(d_path, zip_files[0])
-    ext_dir = os.path.join(d_path, "ext_temp")
-    os.makedirs(ext_dir, exist_ok=True)
-    cmd = ["7z", "x", first_part, f"-o{ext_dir}", "-y"]
+    """Default Mode: Sirf split parts ko merge karta hai, unzip nahi karta."""
+    # Check if files are split parts (.001, .002 etc)
+    all_files = os.listdir(d_path)
+    split_parts = sorted([f for f in all_files if re.search(r'\.\d{3}$', f)])
+    
+    if not split_parts:
+        return False # Single file hai, extraction ki zaroorat nahi
+
+    ACTIVE_TASKS[tid]['status'] = "Merging Parts..."
+    first_part = os.path.join(d_path, split_parts[0])
+    
+    # Using 'e' command to extract/merge parts without creating sub-directories
+    cmd = ["7z", "e", first_part, f"-o{d_path}", "-y"]
     process = await asyncio.create_subprocess_exec(*cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     await process.communicate()
-    for f in zip_files:
+
+    # Delete original parts after merging
+    for f in split_parts:
         p = os.path.join(d_path, f)
         if os.path.exists(p): os.remove(p)
-    for root, dirs, files in os.walk(ext_dir):
-        for file in files: shutil.move(os.path.join(root, file), d_path)
-    shutil.rmtree(ext_dir, ignore_errors=True)
     return True
 
 # --- UPLOAD LOGIC ---
@@ -98,6 +102,7 @@ async def common_upload_logic(client, message, tid, file_path, name, is_video, s
         files_to_upload = await split_file(file_path, tid)
     else:
         files_to_upload = [file_path]
+    
     total_parts = len(files_to_upload)
     upload_mode = await db.get_upload_mode(user_id) or "Media"
     custom_thumb = await db.get_thumb(user_id)
@@ -116,6 +121,7 @@ async def common_upload_logic(client, message, tid, file_path, name, is_video, s
         if custom_thumb:
             try: ph_path = await client.download_media(custom_thumb)
             except: ph_path = None
+        
         if not ph_path and is_video:
             ph_path = generate_thumbnail(path, f"{d_path}/thumb_{i}.jpg")
         
@@ -157,12 +163,14 @@ async def leech_logic(client, message, tid, url, name, is_extract=False):
         try:
             ydl_opts = {'format': 'best', 'outtmpl': f'{d_path}%(title)s.%(ext)s', 'progress_hooks': [ytdl_hook], 'quiet': True}
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(url, download=True)
+                ydl.extract_info(url, download=True)
             
-            if is_extract: await extract_zip_only(d_path, tid)
-            else: await extract_and_merge(d_path, tid)
+            # Use appropriate logic based on flag
+            if is_extract:
+                await extract_zip_only(d_path, tid)
+            else:
+                await extract_and_merge(d_path, tid)
             
-            # Recurse through all files even in subfolders
             all_files = []
             for root, dirs, files in os.walk(d_path):
                 for file in files:
@@ -221,8 +229,12 @@ async def direct_download_logic(client, message, tid, url, name, is_extract):
                                 speed = dl / elapsed if elapsed > 0 else 0
                                 ACTIVE_TASKS[tid].update({'curr': dl, 'speed': f"{speed/1024/1024:.2f} MB/s", 'eta': get_readable_time((total_size-dl)/speed) if speed > 0 else "N/A"})
 
-            if is_extract: await extract_zip_only(d_path, tid)
-            else: await extract_and_merge(d_path, tid)
+            # CRITICAL FIX: Only extract if flag is present
+            if is_extract:
+                await extract_zip_only(d_path, tid)
+            else:
+                # Merge only if split parts exist, otherwise stays as original zip
+                await extract_and_merge(d_path, tid)
 
             all_files = []
             for root, dirs, files in os.walk(d_path):
