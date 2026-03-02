@@ -55,7 +55,6 @@ async def split_file(file_path, tid):
     return sorted([os.path.join(dir_name, f) for f in os.listdir(dir_name) if f.startswith(base_name + ".7z")])
 
 async def extract_zip_only(d_path, tid):
-    """Episode-wise Extraction: Jab user -e use kare."""
     ACTIVE_TASKS[tid]['status'] = "Unzipping Episodes..."
     zip_extensions = ('.zip', '.7z', '.rar', '.001')
     zip_files = [f for f in os.listdir(d_path) if f.lower().endswith(zip_extensions)]
@@ -69,29 +68,24 @@ async def extract_zip_only(d_path, tid):
     return True
 
 async def extract_and_merge(d_path, tid, user_id):
-    """Smart Merge: Agar Media mode hai toh extract karke merge karega."""
     upload_mode = await db.get_upload_mode(user_id) or "Media"
-    
-    # Check for zip/split files
     zip_files = sorted([f for f in os.listdir(d_path) if f.lower().endswith(('.zip', '.7z', '.rar', '.001'))])
-    if not zip_files: return False
+    
+    if zip_files:
+        if upload_mode == "Document":
+            split_parts = [f for f in zip_files if re.search(r'\.\d{3}$', f)]
+            if split_parts:
+                ACTIVE_TASKS[tid]['status'] = "Merging Parts..."
+                cmd = ["7z", "e", os.path.join(d_path, split_parts[0]), f"-o{d_path}", "-y"]
+                await (await asyncio.create_subprocess_exec(*cmd)).communicate()
+                for f in split_parts: os.remove(os.path.join(d_path, f))
+                return True
 
-    # Agar mode Document hai, toh sirf split parts ko merge karo, unzip mat karo
-    if upload_mode == "Document":
-        split_parts = [f for f in zip_files if re.search(r'\.\d{3}$', f)]
-        if not split_parts: return False
-        ACTIVE_TASKS[tid]['status'] = "Merging Parts..."
-        cmd = ["7z", "e", os.path.join(d_path, split_parts[0]), f"-o{d_path}", "-y"]
-        await (await asyncio.create_subprocess_exec(*cmd)).communicate()
-        for f in split_parts: os.remove(os.path.join(d_path, f))
-        return True
-
-    # AGAR MODE MEDIA HAI: Videos merge karke single file banayega
-    ACTIVE_TASKS[tid]['status'] = "Extracting Videos..."
-    for f in zip_files:
-        cmd = ["7z", "x", os.path.join(d_path, f), f"-o{d_path}", "-y"]
-        await (await asyncio.create_subprocess_exec(*cmd)).communicate()
-        os.remove(os.path.join(d_path, f))
+        ACTIVE_TASKS[tid]['status'] = "Extracting Videos..."
+        for f in zip_files:
+            cmd = ["7z", "x", os.path.join(d_path, f), f"-o{d_path}", "-y"]
+            await (await asyncio.create_subprocess_exec(*cmd)).communicate()
+            os.remove(os.path.join(d_path, f))
 
     video_files = []
     for root, dirs, files in os.walk(d_path):
@@ -158,7 +152,7 @@ async def common_upload_logic(client, message, tid, file_path, name, is_video, s
             if ph_path and os.path.exists(ph_path): os.remove(ph_path)
             if os.path.exists(path): os.remove(path)
 
-# --- ENGINE 1: YT-DLP ---
+# --- ENGINE 1: YT-DLP (Updated with Cookies & HLS Fix) ---
 async def leech_logic(client, message, tid, url, name, is_extract=False):
     async with semaphore:
         d_path = f"downloads/{tid}/"
@@ -166,7 +160,7 @@ async def leech_logic(client, message, tid, url, name, is_extract=False):
         user_id = message.from_user.id
         ACTIVE_TASKS[tid] = {'name': name, 'curr': 0, 'total': 1, 'status': 'Downloading', 'speed': '0B/s', 'eta': 'N/A', 'start_time': time.time(), 'user_name': message.from_user.first_name, 'user_id': user_id}
         await db.add_task(tid, user_id, name)
-        status_msg = await client.send_message(message.chat.id, "⏳ Initializing YT Leech...")
+        status_msg = await client.send_message(message.chat.id, "⏳ Initializing Stream Leech...")
         updater_task = asyncio.create_task(status_updater(status_msg, tid))
 
         def ytdl_hook(d):
@@ -175,9 +169,32 @@ async def leech_logic(client, message, tid, url, name, is_extract=False):
                 ACTIVE_TASKS[tid].update({'curr': d.get('downloaded_bytes', 0), 'total': d.get('total_bytes') or d.get('total_bytes_estimate', 1), 'speed': d.get('_speed_str', '0B/s'), 'eta': d.get('_eta_str', 'N/A')})
 
         try:
-            ydl_opts = {'format': 'best', 'outtmpl': f'{d_path}%(title)s.%(ext)s', 'progress_hooks': [ytdl_hook], 'quiet': True}
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl: ydl.extract_info(url, download=True)
+            # Check for User Cookies
+            user_cookies = await db.get_cookies(user_id)
+            cookie_path = os.path.join(d_path, f"cookies_{user_id}.txt")
             
+            ydl_opts = {
+                'format': 'bestvideo+bestaudio/best',
+                'outtmpl': f'{d_path}%(title)s.%(ext)s',
+                'progress_hooks': [ytdl_hook],
+                'quiet': True,
+                'no_warnings': True,
+                'nocheckcertificate': True,
+                'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'referer': 'https://www.hotstar.com/',
+                'hls_prefer_native': True,
+                'retries': 10,
+                'fragment_retries': 10
+            }
+
+            if user_cookies:
+                with open(cookie_path, "w") as f: f.write(user_cookies)
+                ydl_opts['cookiefile'] = cookie_path
+
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=True)
+                if name == "default": ACTIVE_TASKS[tid]['name'] = info.get('title', 'Video')
+
             if is_extract: await extract_zip_only(d_path, tid)
             else: await extract_and_merge(d_path, tid, user_id)
             
@@ -214,7 +231,15 @@ async def direct_download_logic(client, message, tid, url, name, is_extract):
         try:
             if "drive.google.com" in url:
                 ACTIVE_TASKS[tid]['status'] = "G-Drive Syncing..."
-                cmd = ["gdown", "--cookie", "cookies.txt", "-O", d_path, "--folder", url] if "folders" in url else ["gdown", "--cookie", "cookies.txt", "-O", d_path, url]
+                # Use user cookies if available for GDrive too
+                user_cookies = await db.get_cookies(user_id)
+                cookie_arg = []
+                if user_cookies:
+                    c_path = os.path.join(d_path, "g_cookies.txt")
+                    with open(c_path, "w") as f: f.write(user_cookies)
+                    cookie_arg = ["--cookie", c_path]
+                
+                cmd = ["gdown", *cookie_arg, "-O", d_path, "--folder", url] if "folders" in url else ["gdown", *cookie_arg, "-O", d_path, url]
                 await (await asyncio.create_subprocess_exec(*cmd)).communicate()
             else:
                 async with aiohttp.ClientSession() as session:
