@@ -7,3 +7,7 @@ aiohttp
 psutil
 flask
 python-dotenv
+gdown
+hachoir
+ffmpeg-python
+gunicorn
