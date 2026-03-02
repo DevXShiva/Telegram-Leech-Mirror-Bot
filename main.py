@@ -77,7 +77,8 @@ async def start_msg(c, m):
         "• `/yt URL -n Name` : Social Media Leech\n"
         "• `/l URL -n Name` : Direct Link Leech (Auto-Merge)\n"
         "• `/l URL -e` : Extract Mode (Episode-wise)\n"
-        "• `/status` : Check Tasks"
+        "• `/status` : Check Tasks\n"
+        "• `/cancel ID` : Stop Task"
     )
     
     if m.chat.type == enums.ChatType.PRIVATE:
@@ -121,7 +122,7 @@ async def cb_handler(c, query):
         await query.message.edit_caption(caption=welcome_text, reply_markup=get_start_buttons())
     elif query.data == "help":
         await query.message.edit_caption(
-            caption="<b>🛠 Help Menu</b>\n\nUse `/yt` or `/l` with `-n` for custom name.\nUse `-e` with `/l` to skip merging (Zip extraction).",
+            caption="<b>🛠 Help Menu</b>\n\nUse `/yt` or `/l` with `-n` for custom name.\nUse `-e` with `/l` or `/yt` to skip merging (Episode-wise).",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back 🔙", callback_data="back_start")]])
         )
 
@@ -143,47 +144,43 @@ async def broadcast_handler(c, m):
         except: pass
     await m.reply(f"✅ Broadcast Done! Sent to `{count}` users.")
 
+# --- HELPERS: PARSE COMMANDS ---
+def parse_args(text):
+    is_extract = " -e" in text
+    text = text.replace(" -e", "").strip()
+    
+    name = "default"
+    if "-n " in text:
+        parts = text.split("-n ")
+        url = parts[0].strip()
+        name = parts[1].strip()
+    else:
+        url = text.strip()
+    return url, name, is_extract
+
 # --- LEECH COMMANDS ---
-@app.on_message(filters.command("yt"))
+@app.on_message(filters.command(["yt", "ytdl"]))
 async def yt_cmd(c, m):
     if not await can_start_task(c, m): return
-    parts = m.text.split(None, 1)
-    if len(parts) < 2: return await m.reply("❌ Provide URL")
+    if len(m.command) < 2: return await m.reply("❌ **Provide URL**")
     
-    raw = parts[1]
-    name, url = ("default", raw.split("-n ")[0].strip()) if "-n " not in raw else (raw.split("-n ")[1].strip(), raw.split("-n ")[0].strip())
-    
+    url, name, is_extract = parse_args(m.text.split(None, 1)[1])
     tid = str(int(time.time()))
-    await send_log(c, f"🎬 **YT Leech Started**\n👤 {m.from_user.first_name}\n🔗 {url}")
-    asyncio.create_task(leech_logic(c, m, tid, url, name))
+    
+    await send_log(c, f"🎬 **YT Leech Started**\n👤 {m.from_user.first_name}\n🔗 {url}\nExtract: {is_extract}")
+    asyncio.create_task(leech_logic(c, m, tid, url, name, is_extract))
 
 @app.on_message(filters.command("l"))
 async def direct_cmd(c, m):
     if not await can_start_task(c, m): return
-    parts = m.text.split(None, 1)
-    if len(parts) < 2: return await m.reply("❌ Provide URL")
+    if len(m.command) < 2: return await m.reply("❌ **Provide URL**")
     
-    raw = parts[1]
-    
-    # Extract -e flag for Zip Extraction/No-Merge
-    is_extract = False
-    if " -e" in raw:
-        is_extract = True
-        raw = raw.replace(" -e", "").strip()
-
-    # Handle -n while keeping URL clean
-    if "-n " in raw:
-        url = raw.split("-n ")[0].strip()
-        name = raw.split("-n ")[1].strip()
-    else:
-        url = raw.strip()
-        name = "default"
-    
+    url, name, is_extract = parse_args(m.text.split(None, 1)[1])
     tid = str(int(time.time()))
-    log_msg = f"🚀 **Direct Leech Started**\n👤 {m.from_user.first_name}\n🔗 {url}\nMode: {'Extract (-e)' if is_extract else 'Default (Merge)'}"
+    
+    log_msg = f"🚀 **Direct/GDrive Started**\n👤 {m.from_user.first_name}\n🔗 {url}\nMode: {'Extract (-e)' if is_extract else 'Default (Merge)'}"
     await send_log(c, log_msg)
     
-    # Passing is_extract to the logic
     asyncio.create_task(direct_download_logic(c, m, tid, url, name, is_extract))
 
 # --- THUMBNAIL ---
