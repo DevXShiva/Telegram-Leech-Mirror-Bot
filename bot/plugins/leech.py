@@ -139,7 +139,7 @@ async def common_upload_logic(client, user_id, tid, file_path, name, is_video, m
         if not ph_path and is_video:
             ph_path = generate_thumbnail(path, f"{d_path}/thumb_{i}.jpg")
         
-        caption = f"✅ **Leeched:** `{clean_name}`{part_info}\n\n👤 **Requested by:** {mention}"
+        caption = f"`{clean_name}`{part_info}"
         try:
             if upload_mode == "Media" and is_video:
                 sent = await client.send_video(chat_id=user_id, video=path, thumb=ph_path, caption=caption, supports_streaming=True, progress=up_prog)
@@ -308,3 +308,4 @@ async def status_cmd_handler(client, message):
     if not ACTIVE_TASKS: return await message.reply_text("❌ **No active tasks!**")
     status_text = await get_status_msg(ACTIVE_TASKS)
     await message.reply_text(status_text)
+
