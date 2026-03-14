@@ -51,12 +51,12 @@ async def can_start_task(c, m):
             )
             return False
 
-    if len(ACTIVE_TASKS) >= 5:
+    if len(ACTIVE_TASKS) >= 10:
         await m.reply_text("⚠️ **Bot Overloaded! Max 5 global tasks.**")
         return False
         
     u_tasks = [t for t in ACTIVE_TASKS.values() if t.get('user_id') == user_id]
-    if len(u_tasks) >= 2: 
+    if len(u_tasks) >= 5: 
         await m.reply("❌ **Limit Exceeded! You can run only 2 tasks at a time.**")
         return False
     return True
